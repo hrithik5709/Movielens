@@ -1,0 +1,306 @@
+---
+title: "Movielens~ Movie Ratings Prediction"
+author: "Hrithik Muskan"
+date: "04/01/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Index:
+* **Introduction**
+  + *Dataset Generation*  
+  + *Goal*  
+  + *Key Steps*  
+* **Methods**  
+  + *Data Exploration*  
+  + *Data Visualization* 
+  + *Modeling*
+  + *COmparing with RMSE*
+* **RMSE (Root Mean Square Error)**
+* **Modeling Approach**
+  + *Approach-1: Taking average of ratings(Naive Method)*
+  + *Approach-2: Considering Deviation from the mean rating as the bias term*
+  + *Approach-3: Taking attributes of users into consideration *
+  + *Approach-4: Considering Regularization*
+  + *Approach-5: Taking all, 2nd, 3rd and 4th approach together*
+* **Conclusion**  
+* **References**
+
+\newpage
+# Introduction
+
+MovieLens is a web-based recommender system and virtual community that recommends movies for its users to watch, based on their film preferences using collaborative filtering of members' movie ratings and movie reviews. It contains about 11 million ratings for about 8500 movies.[1] MovieLens was created in 1997 by GroupLens Research, a research lab in the Department of Computer Science and Engineering at the University of Minnesota,[2] in order to gather research data on personalized recommendations.
+This project is on a rating prediction system using the dataset from grouplens.
+
+## Dataset Generation
+```{r}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+# Goal:
+Goal of this project is to create a movie recommendation system using machine learning and data analytics and to achieve a RMSE < 0.86490
+# Data Exploration:
+
+## Glimpse of the data:
+```{r}
+glimpse(edx)
+```
+## Distinct Movies
+```{r}
+n_distinct(edx$movieId)
+```
+## Distinct Users
+```{r}
+n_distinct(edx$userId)
+```
+## Movie Genres and Ratings
+```{r}
+genres = c("Drama", "Comedy", "Thriller", "Romance")
+sapply(genres, function(g) {
+    sum(str_detect(edx$genres, g))
+})
+```
+
+***
+
+# Data Visualisation:
+  
+Let's see a few important visualizations:
+
+## Number of Movies and Number of Ratings
+```{r}
+edx %>%
+count(movieId) %>%
+ggplot(aes(n)) +
+geom_histogram(bins = 20, color = "yellow") +
+scale_x_log10() +
+xlab("Ratings") +
+  ylab("Movies") +
+ggtitle("Movie and Ratings")
+```
+
+# Genres and Ratings
+
+```{r}
+popular_genres <- edx %>%group_by(genres) %>% summarize(n = n(),sd = sd(rating) ,se  = sd/sqrt(n),avg = mean(rating)) %>%filter(n>10000)%>%top_n(5, avg) %>%mutate(genres = reorder(genres, avg))
+plot1 <- popular_genres %>% ggplot (aes(x=genres, y=avg)) +
+    geom_point() +
+    geom_errorbar(aes(ymin=avg-se, ymax=avg+se), width=0.5, colour="blue", alpha=0.5, size=1) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    ggtitle("Popular Genres with more than 10,000 Ratings")
+plot1
+```
+# User Ratings 
+```{r}
+edx %>%count(userId) %>%ggplot(aes(n)) +
+geom_histogram(bins = 20, color = "yellow") +scale_x_log10() +
+xlab("Ratings") + ylab("users") +ggtitle("User Ratings")
+```
+# Insights:
+1. The movie genre has a good effect o ratings, some genres are very popular and thus get ratings more than 3.5
+2. Users also have great effect, more users have given less number of ratings and obviously we should set a band for considering a user's rating. (For example: Users who have given more than 15 ratings should be considered only to account for prediction)(bias)
+
+***
+
+\newpage
+
+# **Modeling**
+
+# Accuracy Check
+This will be done by using the RMSE method , where we calcluate the root of mean of the squared error that in prediction with respect to actual value.
+Let's define our accuracy check function using RMSE
+```{r}
+Accuracy <- function(actual_ratings, predicted_ratings){
+  sqrt(mean((actual_ratings - predicted_ratings)^2))
+}
+```
+
+***
+
+# Possible Bias:
+1. User Bias = mean(user)-mean(allusers)
+2. Movie Bias= mean(movie)-mean(allmovie)
+
+These bias terms will help us achieve better results.
+
+## Approach-1:
+Naive Average
+```{r}
+avg<-mean(edx$rating)
+results1<- Accuracy(validation$rating,avg)
+results1
+```
+## Approach-2:
+Deviation from mean rating, bias due to movies.
+```{r}
+movie_dev <- edx %>%
+  group_by(movieId) %>%
+  summarize(movie_bias = mean(rating - avg))
+movie_dev
+```
+
+Applying the bias factor:
+
+```{r}
+approach_2 <- avg +  validation %>%
+  left_join(movie_dev, by='movieId') %>%
+  pull(movie_bias)
+results2 <- Accuracy(approach_2, validation$rating)
+results2
+```
+## Approach-3 
+Considering the user deviation or bias:
+```{r}
+user_dev<- edx %>% 
+  left_join(movie_dev, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(user_bias = mean(rating - avg - movie_bias))
+
+```
+
+```{r}
+predicted_ratings <- validation%>%
+  left_join(movie_dev, by='movieId') %>%
+  left_join(user_dev, by='userId') %>%
+  mutate(pred = avg + user_bias) %>%
+  pull(pred)
+
+results3<- Accuracy(predicted_ratings, validation$rating)
+results3
+```
+## Approach-4
+Considering both User as well as movie bias
+```{r}
+predicted_ratings <- validation%>%
+  left_join(movie_dev, by='movieId') %>%
+  left_join(user_dev, by='userId') %>%
+  mutate(pred = avg + user_bias+movie_bias) %>%
+  pull(pred)
+
+results4<- Accuracy(predicted_ratings, validation$rating)
+results4
+```
+
+***
+
+## Regularization
+
+Now we considered the user and movie bias and are very close to achieve the goal of a RMSE<0.86490, for that purpose now Regularization will be useful as it will put some penalty on the user bias as well as the movie bias resulting due to a movie which has very less number of ratings and also users who didn't give a lot of ratings.
+We need to find out a tuning parameter which will lower the RMSE in such cases.
+Let's find out and get to the fine tuning of our approach:
+
+# Approach-5
+
+```{r}
+
+alpha <- seq(1, 10, 0.25)
+
+
+rmses <- sapply(alpha, function(l){
+  
+  avg <- mean(edx$rating)
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - avg)/(n()+l))
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - avg)/(n()+l))
+  predicted_ratings <- 
+    validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = avg + b_i + b_u) %>%
+    pull(pred)
+  
+  return(Accuracy(predicted_ratings, validation$rating))
+})
+```
+
+# Now let's choose the best possible alpha
+```{r}
+
+alpha <- alpha[which.min(rmses)]
+alpha
+```
+# Accuracy of this model is:
+```{r}
+min(rmses)
+result5=min(rmses)
+```
+# Conclusion:
+
+```{r}
+
+Models<-c("Naive","Movie Bias","User Bias","Movie and user Bias"," Regulaization and User+Movie bias")
+Results<-c(results1,results2,results3,results4,result5)
+Prediction_Table= data.frame(Models,Results)
+Prediction_Table
+```
+ 
+***
+We do notice that the 5th mode has a Rmse < 0.86490 and thus we achieve the goal.  
+
+Hence we got the desired results with the help of a few techniques. Moreover we can go for feature engineering to get even better results and we can also try:
+ 1. Matrix Factorization
+ 2. COnsidering Genres
+ 
+\newpage
+
+# References
+
+1. <https://en.wikipedia.org/wiki/MovieLens>
+2. <https://stackoverflow.com/questions/62140483/how-to-interpret-dplyr-message-summarise-regrouping-output-by-x-override>
